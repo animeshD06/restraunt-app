@@ -1,0 +1,71 @@
+Environment
+Backend started in in-memory PostgreSQL test mode on http://127.0.0.1:54013
+
+GET /menu
+PASS - returned 8 menu items
+
+GET /tables
+PASS - returned 8 tables
+
+PUT /tables/:id/status
+PASS - table 8 marked maintenance
+
+POST /orders on maintenance table
+PASS - rejected with HTTP 400 as expected
+
+POST /reservations
+PASS - reservation 1 created for table 2
+
+POST /reservations conflicting slot
+PASS - conflicting reservation rejected with HTTP 400
+
+GET /reservations
+PASS - returned 1 reservation(s)
+
+POST /orders
+PASS - order 1 created for table 1
+
+GET /orders
+PASS - order 1 visible with total 11.97
+
+GET /orders/:id/items
+PASS - returned 2 line items
+
+PUT /orders/:id preparing
+PASS - order moved to preparing
+
+PUT /orders/:id invalid transition
+PASS - invalid transition rejected with HTTP 400
+
+PUT /orders/:id served
+PASS - order moved to served
+
+GET /orders/:id/bill
+PASS - bill total 11.97
+
+POST /orders/:id/payment
+PASS - payment recorded and order moved to paid
+
+POST /orders/:id/payment duplicate
+PASS - duplicate payment rejected with HTTP 400
+
+DELETE /orders/:id on paid order
+PASS - cancellation rejected for paid order
+
+PUT /reservations/:id/status
+PASS - reservation moved to completed
+
+GET /reports/revenue
+PASS - returned 1 revenue row(s)
+
+GET /reports/popular
+PASS - top item Coffee
+
+GET /reports/payments
+PASS - payment methods covered: cash
+
+GET /reports/tables
+PASS - returned 8 table utilization rows
+
+Final table state validation
+PASS - occupied/reserved tables returned to available
