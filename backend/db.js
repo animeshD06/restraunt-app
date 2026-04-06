@@ -5,6 +5,8 @@ const { Pool } = require('pg');
 const DEFAULT_SCHEMA = process.env.PG_SCHEMA || 'restaurant_app';
 const STATUS_VALUES = ['pending', 'preparing', 'served', 'paid', 'cancelled'];
 let initializationPromise = null;
+let pool = null;
+let activeDriver = null;
 
 function quoteIdentifier(identifier) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
@@ -103,7 +105,7 @@ function sanitizeSetupSqlForMemory(sql) {
 async function ensureInitialized() {
   if (!initializationPromise) {
     initializationPromise = (async () => {
-      if (process.env.USE_PG_MEM === 'true') {
+      if (activeDriver === 'memory') {
         const setupSql = fs.readFileSync(path.join(__dirname, 'setup.sql'), 'utf8');
         const client = await pool.connect();
         try {
@@ -118,37 +120,104 @@ async function ensureInitialized() {
   return initializationPromise;
 }
 
-const pool = process.env.USE_PG_MEM === 'true' ? createMemoryPool() : new Pool(buildPoolConfig());
 const SEARCH_PATH_SQL = `SET search_path TO ${quoteIdentifier(DEFAULT_SCHEMA)}, public`;
 
-pool.on('connect', async (client) => {
-  if (process.env.USE_PG_MEM !== 'true') {
+function attachPostgresListeners(targetPool) {
+  targetPool.on('connect', async (client) => {
+    await client.query(SEARCH_PATH_SQL);
+  });
+
+  targetPool.on('error', (error) => {
+    console.error('Unexpected PostgreSQL pool error:', error);
+  });
+}
+
+function ensurePool() {
+  if (pool) {
+    return;
+  }
+
+  if (process.env.USE_PG_MEM === 'true') {
+    pool = createMemoryPool();
+    activeDriver = 'memory';
+    return;
+  }
+
+  pool = new Pool(buildPoolConfig());
+  activeDriver = 'postgres';
+  attachPostgresListeners(pool);
+}
+
+function canFallbackToMemory(error) {
+  if (process.env.USE_PG_MEM === 'true' || process.env.ALLOW_PG_MEM_FALLBACK === 'false') {
+    return false;
+  }
+
+  const errorText = [error?.code, error?.message, error?.stack].filter(Boolean).join(' ');
+  return /ECONNREFUSED|ENOTFOUND|database .* does not exist|password authentication failed|SASL|timeout expired/i.test(errorText);
+}
+
+async function switchToMemoryPool(error) {
+  if (activeDriver === 'memory') {
+    return;
+  }
+
+  if (pool) {
+    await pool.end().catch(() => {});
+  }
+
+  pool = createMemoryPool();
+  activeDriver = 'memory';
+  initializationPromise = null;
+  const reason = error?.message || error?.code || 'connection error';
+  console.warn(`PostgreSQL unavailable, falling back to in-memory database: ${reason}`);
+  await ensureInitialized();
+}
+
+async function executeWithFallback(operation) {
+  ensurePool();
+
+  try {
+    return await operation();
+  } catch (error) {
+    if (!canFallbackToMemory(error)) {
+      throw error;
+    }
+
+    await switchToMemoryPool(error);
+    return operation();
+  }
+}
+
+async function createConnection() {
+  await ensureInitialized();
+  const client = await pool.connect();
+  if (activeDriver === 'postgres') {
     await client.query(SEARCH_PATH_SQL);
   }
-});
 
-pool.on('error', (error) => {
-  console.error('Unexpected PostgreSQL pool error:', error);
-});
+  return {
+    beginTransaction: async () => client.query('BEGIN'),
+    commit: async () => client.query('COMMIT'),
+    rollback: async () => client.query('ROLLBACK'),
+    query: async (sql, params = []) => runOnClient(client, sql, params),
+    release: () => client.release(),
+  };
+}
 
 module.exports = {
   STATUS_VALUES,
-  query: async (sql, params = []) => runOnClient(pool, sql, params),
-  getConnection: async () => {
-    await ensureInitialized();
-    const client = await pool.connect();
-    if (process.env.USE_PG_MEM !== 'true') {
-      await client.query(SEARCH_PATH_SQL);
+  query: async (sql, params = []) => executeWithFallback(() => runOnClient(pool, sql, params)),
+  getConnection: async () => executeWithFallback(createConnection),
+  close: async () => {
+    if (!pool) {
+      return;
     }
 
-    return {
-      beginTransaction: async () => client.query('BEGIN'),
-      commit: async () => client.query('COMMIT'),
-      rollback: async () => client.query('ROLLBACK'),
-      query: async (sql, params = []) => runOnClient(client, sql, params),
-      release: () => client.release(),
-    };
+    await pool.end();
+    pool = null;
+    activeDriver = null;
+    initializationPromise = null;
   },
-  close: async () => pool.end(),
   ensureInitialized,
 };

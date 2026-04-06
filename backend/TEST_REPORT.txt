@@ -1,5 +1,5 @@
 Environment
-Backend started in in-memory PostgreSQL test mode on http://127.0.0.1:54013
+Backend started in in-memory PostgreSQL test mode on http://127.0.0.1:51751
 
 GET /menu
 PASS - returned 8 menu items
